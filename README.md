@@ -1,4 +1,4 @@
-# s3-server
+# S3 Server
 
 A minimal, local S3-compatible server written in Bun. It stores objects on disk and supports:
 - `GET` object
@@ -41,7 +41,7 @@ bun server
 
 ### You can start the server directly
 ```ts
-import { S3Server } from "./S3Server";
+import { S3Server } from 's3'
 
 await new S3Server({
   port: 9000,
@@ -53,7 +53,7 @@ await new S3Server({
 
 ### Or use it inside your Bun.serve
 ```ts
-import { S3Server } from "./S3Server";
+import { S3Server } from 's3'
 
 const s3 = new S3Server({
   path: '~/storage',
