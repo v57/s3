@@ -42,6 +42,7 @@ export class S3Server {
     await mkdir(this.options.path, { recursive: true })
     this.server = Bun.serve({
       port: this.options.port ?? 9000,
+      hostname: '0.0.0.0',
       fetch: this.fetch,
     })
     if (log) {

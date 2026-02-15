@@ -11,15 +11,3 @@ const config = {
   maxTimeSkewSeconds: Number.parseInt(process.env.S3_MAX_TIME_SKEW_SECONDS ?? '0', 10) || 0,
 }
 await new S3Server(config).start(true)
-
-const s3 = new S3Server({
-  path: '~/storage',
-  key: 'local-key',
-  secret: 'local-secret',
-})
-Bun.serve({
-  port: 9000,
-  fetch(request: Request) {
-    return s3.fetch(request)
-  },
-})
