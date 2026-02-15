@@ -1,6 +1,7 @@
 import { lstat, mkdir, readdir, rename, stat, unlink } from 'fs/promises'
 import { createHash, createHmac, timingSafeEqual } from 'crypto'
 import path from 'path'
+import { isIP } from 'net'
 import type { HeadersInit, Server } from 'bun'
 
 export type S3ServerOptions = {
@@ -440,18 +441,19 @@ export class S3Server {
     }
   }
 
-  private parseBucketFromHost(req: Request) {
-    const host = req.headers.get('host')
-    if (!host) return null
-    const hostname = host.split(':')[0] ?? ''
+  private parseBucketFromHost(url: URL) {
+    const hostname = url.hostname
+    if (!hostname) return null
+    const lower = hostname.toLowerCase()
+    if (lower === 'localhost' || lower.endsWith('.local') || isIP(lower)) return null
     const parts = hostname.split('.')
     if (parts.length <= 1) return null
     const bucket = parts[0]
-    return bucket && bucket !== 'localhost' ? bucket : null
+    return bucket ? bucket : null
   }
 
-  private parseBucketAndKey(req: Request, url: URL) {
-    const hostBucket = this.parseBucketFromHost(req)
+  private parseBucketAndKey(url: URL) {
+    const hostBucket = this.parseBucketFromHost(url)
     const parts = url.pathname.split('/').filter(Boolean)
     let bucket = parts.at(0)
     if (!bucket) return { bucket: hostBucket, key: null }
@@ -628,7 +630,7 @@ export class S3Server {
     if (authError) return authError
 
     try {
-      ;({ bucket, key } = this.parseBucketAndKey(req, url))
+      ;({ bucket, key } = this.parseBucketAndKey(url))
     } catch (err) {
       return this.s3Error('InvalidURI', (err as Error).message, 400)
     }
