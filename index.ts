@@ -506,9 +506,16 @@ export class S3Server {
     return `"${hash}"`
   }
 
-  private async listObjects(bucket: string, prefix: string | null, maxKeys: number, continuationToken: string | null) {
+  private async listObjects(
+    bucket: string,
+    prefix: string | null,
+    maxKeys: number,
+    continuationToken: string | null,
+    delimiter: string | null,
+  ) {
     const bucketPath = this.resolveBucketPath(bucket)
     const results: ObjectInfo[] = []
+    const commonPrefixes = new Set<string>()
     let hitLimit = false
     let seenContinuation = !continuationToken
 
@@ -519,10 +526,23 @@ export class S3Server {
       for (const entry of entries) {
         if (hitLimit) return
         const fullPath = path.join(dir, entry.name)
+
         if (entry.isDirectory()) {
+          const rel = path.relative(bucketPath, fullPath)
+          const dirKey = this.toPosix(rel) + '/'
+          if (prefix && !dirKey.startsWith(prefix) && !prefix.startsWith(dirKey)) continue
+          if (delimiter && dirKey.startsWith(prefix ?? '')) {
+            const afterPrefix = dirKey.slice((prefix ?? '').length)
+            const delimIdx = afterPrefix.indexOf(delimiter)
+            if (delimIdx !== -1) {
+              commonPrefixes.add((prefix ?? '') + afterPrefix.slice(0, delimIdx + delimiter.length))
+              continue
+            }
+          }
           await walk(fullPath)
           continue
         }
+
         if (!entry.isFile()) continue
         const rel = path.relative(bucketPath, fullPath)
         const key = this.toPosix(rel)
@@ -550,6 +570,7 @@ export class S3Server {
     await walk(bucketPath)
     return {
       objects: results,
+      commonPrefixes: [...commonPrefixes].sort(),
       isTruncated: hitLimit,
       nextToken: hitLimit ? (results.at(results.length - 1)?.key ?? null) : null,
     }
@@ -558,7 +579,9 @@ export class S3Server {
   private listXml(
     bucket: string,
     prefix: string | null,
+    delimiter: string | null,
     objects: ObjectInfo[],
+    commonPrefixes: string[],
     maxKeys: number,
     isTruncated: boolean,
     continuationToken: string | null,
@@ -578,6 +601,17 @@ export class S3Server {
       )
       .join('')
 
+    const prefixesXml = commonPrefixes
+      .map(p => `
+  <CommonPrefixes>
+    <Prefix>${this.xmlEscape(p)}</Prefix>
+  </CommonPrefixes>`)
+      .join('')
+
+    const delimiterXml = delimiter
+      ? `
+  <Delimiter>${this.xmlEscape(delimiter)}</Delimiter>`
+      : ''
     const continuationXml =
       listType === '2' && continuationToken
         ? `
@@ -593,9 +627,9 @@ export class S3Server {
 <ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
   <Name>${this.xmlEscape(bucket)}</Name>
   <Prefix>${this.xmlEscape(prefix ?? '')}</Prefix>
-  <KeyCount>${objects.length}</KeyCount>
+  <KeyCount>${objects.length + commonPrefixes.length}</KeyCount>
   <MaxKeys>${maxKeys}</MaxKeys>
-  <IsTruncated>${isTruncated ? 'true' : 'false'}</IsTruncated>${continuationXml}${nextTokenXml}${contents}
+  <IsTruncated>${isTruncated ? 'true' : 'false'}</IsTruncated>${delimiterXml}${continuationXml}${nextTokenXml}${contents}${prefixesXml}
 </ListBucketResult>`
 
     return this.xmlResponse(body)
@@ -646,12 +680,13 @@ export class S3Server {
         return this.s3Error('InvalidRequest', 'Unsupported list type', 400)
       }
       const prefix = url.searchParams.get('prefix')
+      const delimiter = url.searchParams.get('delimiter')
       const rawMaxKeys = url.searchParams.get('max-keys')
       const parsedMaxKeys = rawMaxKeys ? Number.parseInt(rawMaxKeys, 10) : NaN
       const maxKeys = Number.isFinite(parsedMaxKeys) && parsedMaxKeys > 0 ? Math.min(parsedMaxKeys, 1000) : 1000
       const continuationToken = listType === '2' ? (url.searchParams.get('continuation-token') ?? null) : null
-      const { objects, isTruncated, nextToken } = await this.listObjects(bucket, prefix, maxKeys, continuationToken)
-      return this.listXml(bucket, prefix, objects, maxKeys, isTruncated, continuationToken, nextToken, listType)
+      const { objects, commonPrefixes, isTruncated, nextToken } = await this.listObjects(bucket, prefix, maxKeys, continuationToken, delimiter)
+      return this.listXml(bucket, prefix, delimiter, objects, commonPrefixes, maxKeys, isTruncated, continuationToken, nextToken, listType)
     }
 
     if (!key) {
