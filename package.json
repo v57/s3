@@ -3,6 +3,9 @@
   "module": "index.ts",
   "type": "module",
   "private": false,
+  "bin": {
+    "s3": "server.ts"
+  },
   "scripts": {
     "server": "bun server.ts"
   },
