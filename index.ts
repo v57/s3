@@ -449,7 +449,9 @@ export class S3Server {
     const lower = hostname.toLowerCase()
     if (lower === 'localhost' || lower.endsWith('.local') || isIP(lower)) return null
     const parts = hostname.split('.')
-    if (parts.length <= 1) return null
+    // Treat two-label hosts (for example "machine.lan") as endpoint hosts for
+    // path-style requests. Virtual-host style requires a subdomain plus base domain.
+    if (parts.length <= 2) return null
     const bucket = parts[0]
     return bucket ? bucket : null
   }
@@ -603,10 +605,12 @@ export class S3Server {
       .join('')
 
     const prefixesXml = commonPrefixes
-      .map(p => `
+      .map(
+        p => `
   <CommonPrefixes>
     <Prefix>${this.xmlEscape(p)}</Prefix>
-  </CommonPrefixes>`)
+  </CommonPrefixes>`,
+      )
       .join('')
 
     const delimiterXml = delimiter
@@ -686,8 +690,25 @@ export class S3Server {
       const parsedMaxKeys = rawMaxKeys ? Number.parseInt(rawMaxKeys, 10) : NaN
       const maxKeys = Number.isFinite(parsedMaxKeys) && parsedMaxKeys > 0 ? Math.min(parsedMaxKeys, 1000) : 1000
       const continuationToken = listType === '2' ? (url.searchParams.get('continuation-token') ?? null) : null
-      const { objects, commonPrefixes, isTruncated, nextToken } = await this.listObjects(bucket, prefix, maxKeys, continuationToken, delimiter)
-      return this.listXml(bucket, prefix, delimiter, objects, commonPrefixes, maxKeys, isTruncated, continuationToken, nextToken, listType)
+      const { objects, commonPrefixes, isTruncated, nextToken } = await this.listObjects(
+        bucket,
+        prefix,
+        maxKeys,
+        continuationToken,
+        delimiter,
+      )
+      return this.listXml(
+        bucket,
+        prefix,
+        delimiter,
+        objects,
+        commonPrefixes,
+        maxKeys,
+        isTruncated,
+        continuationToken,
+        nextToken,
+        listType,
+      )
     }
 
     if (!key) {
