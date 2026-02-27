@@ -42,16 +42,17 @@ export class S3Server {
 
   async start(log: boolean = false) {
     await mkdir(this.options.path, { recursive: true })
+    const hostname = this.options.host ?? '0.0.0.0'
     this.server = Bun.serve({
       port: this.options.port ?? 9000,
-      hostname: this.options.host ?? '0.0.0.0',
+      hostname,
       fetch: this.fetch,
     })
     if (log) {
       console.log(`Access Key: ${this.options.key}`)
       console.log(`Secret Key: ${this.options.secret}`)
       console.log(`Directory: ${this.options.path}`)
-      console.log(`http://localhost:${this.server.port}`)
+      console.log(`http://${hostname}:${this.server.port}`)
     }
     return this.server
   }
