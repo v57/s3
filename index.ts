@@ -7,7 +7,8 @@ import type { HeadersInit, Server } from 'bun'
 export type S3ServerOptions = {
   host?: string
   port?: number
-  path: string
+  path?: string
+  bucketPaths?: Record<string, string>
   key: string
   secret: string
   sessionToken?: string | null
@@ -31,9 +32,17 @@ export class S3Server {
     const maxTimeSkewSeconds = Number.isFinite(options.maxTimeSkewSeconds ?? NaN)
       ? Math.max(0, options.maxTimeSkewSeconds as number)
       : 0
+    const bucketPaths: Record<string, string> = {}
+    for (const [bucket, bucketPath] of Object.entries(options.bucketPaths ?? {})) {
+      if (!bucketPath || !bucketPath.trim()) {
+        throw new Error(`bucket path is required for ${bucket}`)
+      }
+      bucketPaths[normalizeBucketName(bucket)] = normalizeFsPath(bucketPath)
+    }
     this.options = {
       ...options,
-      path: path.isAbsolute(options.path) ? options.path : path.resolve(process.cwd(), options.path),
+      path: options.path ? normalizeFsPath(options.path) : undefined,
+      bucketPaths,
       sessionToken: options.sessionToken ?? null,
       maxSize: maxBodyBytes,
       maxTimeSkewSeconds,
@@ -41,7 +50,12 @@ export class S3Server {
   }
 
   async start(log: boolean = false) {
-    await mkdir(this.options.path, { recursive: true })
+    const directories = new Set<string>()
+    if (this.options.path) directories.add(this.options.path)
+    for (const bucketPath of Object.values(this.options.bucketPaths ?? {})) {
+      directories.add(bucketPath)
+    }
+    await Promise.all([...directories].map(dir => mkdir(dir, { recursive: true })))
     const hostname = this.options.host ?? '0.0.0.0'
     this.server = Bun.serve({
       port: this.options.port ?? 9000,
@@ -51,7 +65,13 @@ export class S3Server {
     if (log) {
       console.log(`Access Key: ${this.options.key}`)
       console.log(`Secret Key: ${this.options.secret}`)
-      console.log(`Directory: ${this.options.path}`)
+      if (this.options.path) {
+        console.log(`Directory: ${this.options.path}`)
+      }
+      const bucketPaths = Object.entries(this.options.bucketPaths ?? {})
+      if (bucketPaths.length > 0) {
+        console.log(`Bucket paths: ${bucketPaths.map(([bucket, bucketPath]) => `${bucket}=${bucketPath}`).join(', ')}`)
+      }
       console.log(`http://${hostname}:${this.server.port}`)
     }
     return this.server
@@ -406,6 +426,9 @@ export class S3Server {
   }
 
   private resolveBucketPath(bucket: string) {
+    const configuredBucketPath = this.options.bucketPaths?.[bucket]
+    if (configuredBucketPath) return configuredBucketPath
+    if (!this.options.path) return null
     const bucketPath = path.resolve(this.options.path, bucket)
     if (bucketPath !== this.options.path && !bucketPath.startsWith(this.options.path + path.sep)) {
       throw new Error('bucket escapes data directory')
@@ -415,6 +438,9 @@ export class S3Server {
 
   private resolveObjectPath(bucket: string, key: string) {
     const bucketPath = this.resolveBucketPath(bucket)
+    if (!bucketPath) {
+      throw new Error('bucket not configured')
+    }
     const resolved = path.resolve(bucketPath, key)
     if (resolved !== bucketPath && !resolved.startsWith(bucketPath + path.sep)) {
       throw new Error('key escapes bucket directory')
@@ -517,6 +543,9 @@ export class S3Server {
     delimiter: string | null,
   ) {
     const bucketPath = this.resolveBucketPath(bucket)
+    if (!bucketPath) {
+      throw new Error('bucket not configured')
+    }
     const results: ObjectInfo[] = []
     const commonPrefixes = new Set<string>()
     let hitLimit = false
@@ -591,6 +620,7 @@ export class S3Server {
     nextToken: string | null,
     listType: string | null,
   ) {
+    console.time('listxml')
     const contents = objects
       .map(
         obj => `
@@ -636,11 +666,12 @@ export class S3Server {
   <MaxKeys>${maxKeys}</MaxKeys>
   <IsTruncated>${isTruncated ? 'true' : 'false'}</IsTruncated>${delimiterXml}${continuationXml}${nextTokenXml}${contents}${prefixesXml}
 </ListBucketResult>`
-
+    console.timeEnd('listxml')
     return this.xmlResponse(body)
   }
 
   fetch = async (req: Request) => {
+    console.time('req')
     const url = new URL(req.url)
     let bucket: string | null
     let key: string | null
@@ -678,7 +709,6 @@ export class S3Server {
     if (!bucket) {
       return this.s3Error('NoSuchBucket', 'Bucket not specified', 404)
     }
-
     if (!key && req.method === 'GET') {
       const listType = url.searchParams.get('list-type')
       if (listType && listType !== '2') {
@@ -690,14 +720,25 @@ export class S3Server {
       const parsedMaxKeys = rawMaxKeys ? Number.parseInt(rawMaxKeys, 10) : NaN
       const maxKeys = Number.isFinite(parsedMaxKeys) && parsedMaxKeys > 0 ? Math.min(parsedMaxKeys, 1000) : 1000
       const continuationToken = listType === '2' ? (url.searchParams.get('continuation-token') ?? null) : null
-      const { objects, commonPrefixes, isTruncated, nextToken } = await this.listObjects(
-        bucket,
-        prefix,
-        maxKeys,
-        continuationToken,
-        delimiter,
-      )
-      return this.listXml(
+      let objects: ObjectInfo[]
+      let commonPrefixes: string[]
+      let isTruncated: boolean
+      let nextToken: string | null
+      try {
+        ;({ objects, commonPrefixes, isTruncated, nextToken } = await this.listObjects(
+          bucket,
+          prefix,
+          maxKeys,
+          continuationToken,
+          delimiter,
+        ))
+      } catch (err) {
+        if ((err as Error).message === 'bucket not configured') {
+          return this.s3Error('NoSuchBucket', 'Bucket not configured', 404)
+        }
+        return this.s3Error('InternalError', (err as Error).message, 500)
+      }
+      const result = this.listXml(
         bucket,
         prefix,
         delimiter,
@@ -709,8 +750,9 @@ export class S3Server {
         nextToken,
         listType,
       )
+      console.timeEnd('req')
+      return result
     }
-
     if (!key) {
       return this.s3Error('InvalidRequest', 'Key is required', 400)
     }
@@ -719,15 +761,20 @@ export class S3Server {
     try {
       filePath = this.resolveObjectPath(bucket, this.normalizeKey(key))
     } catch (err) {
+      if ((err as Error).message === 'bucket not configured') {
+        return this.s3Error('NoSuchBucket', 'Bucket not configured', 404)
+      }
       return this.s3Error('InvalidURI', (err as Error).message, 400)
     }
     const bucketPath = this.resolveBucketPath(bucket)
+    if (!bucketPath) {
+      return this.s3Error('NoSuchBucket', 'Bucket not configured', 404)
+    }
     try {
       await this.assertNoSymlinkInPath(bucketPath, filePath)
     } catch (err) {
       return this.s3Error('InvalidURI', (err as Error).message, 400)
     }
-
     if (req.method === 'PUT') {
       await mkdir(path.dirname(filePath), { recursive: true })
       const tmpPath = `${filePath}.upload-${Bun.randomUUIDv7()}`
@@ -787,4 +834,29 @@ export class S3Server {
 
     return this.s3Error('MethodNotAllowed', 'Unsupported method', 405)
   }
+}
+
+function normalizeFsPath(value: string) {
+  const expanded = value.startsWith('~/')
+    ? (() => {
+        const home = Bun.env.HOME
+        if (!home) throw new Error('Bun.env.HOME is required to expand ~/ paths')
+        return path.join(home, value.slice(2))
+      })()
+    : value === '~'
+      ? (() => {
+          const home = Bun.env.HOME
+          if (!home) throw new Error('Bun.env.HOME is required to expand ~ paths')
+          return home
+        })()
+      : value
+  return path.isAbsolute(expanded) ? expanded : path.resolve(process.cwd(), expanded)
+}
+
+function normalizeBucketName(bucket: string) {
+  if (!bucket || !bucket.trim()) throw new Error('bucket name is required')
+  if (bucket.includes('/') || bucket.includes('\\')) {
+    throw new Error('invalid bucket')
+  }
+  return bucket
 }

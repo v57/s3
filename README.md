@@ -37,6 +37,11 @@ PORT=8000 \
 bun server
 ```
 
+When using the library directly, `path` is an optional fallback root. You can also
+provide explicit paths for individual buckets with `bucketPaths`; buckets without
+an entry will be rejected when no fallback `path` is set. Paths starting with `~/`
+are expanded against `Bun.env.HOME`.
+
 ## Use in Bun
 
 ### You can start the server directly
@@ -45,9 +50,12 @@ import { S3Server } from 's3'
 
 await new S3Server({
   port: 9000,
-  path: '~/storage',
   key: 'local-key',
   secret: 'local-secret',
+  bucketPaths: {
+    photos: '~/storage/photos',
+    backups: '~/storage/backups',
+  },
 }).start()
 ```
 
@@ -56,9 +64,11 @@ await new S3Server({
 import { S3Server } from 's3'
 
 const s3 = new S3Server({
-  path: '~/storage',
   key: 'local-key',
   secret: 'local-secret',
+  bucketPaths: {
+    hub: '~/storage/hub',
+  },
 })
 Bun.serve({
   port: 9000,

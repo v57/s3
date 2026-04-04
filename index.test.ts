@@ -1,7 +1,8 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test'
 import { S3Server } from '.'
 import { S3Client } from 'bun'
-import { mkdtemp, rm } from 'fs/promises'
+import type { Server } from 'bun'
+import { lstat, mkdtemp, rm } from 'fs/promises'
 import { tmpdir } from 'os'
 import path from 'path'
 
@@ -13,11 +14,11 @@ const BASE_URL = `http://localhost:${PORT}`
 
 let client: S3Client
 let tmpDir: string
+let server: Server<unknown>
 
 beforeAll(async () => {
   tmpDir = await mkdtemp(path.join(tmpdir(), 's3-test-'))
-  const server = new S3Server({ key: KEY, secret: SECRET, port: PORT, path: tmpDir })
-  await server.start()
+  server = await new S3Server({ key: KEY, secret: SECRET, port: PORT, path: tmpDir }).start()
   client = new S3Client({
     accessKeyId: KEY,
     secretAccessKey: SECRET,
@@ -27,6 +28,7 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
+  server.stop()
   await rm(tmpDir, { recursive: true, force: true })
 })
 
@@ -164,5 +166,124 @@ describe('LIST delimiter', () => {
     // All keys are under directories, so no root-level files in testbucket
     expect(result.commonPrefixes?.some(p => p.prefix === 'delim/')).toBe(true)
     expect(result.contents?.some(c => c.key.includes('/'))).toBe(false)
+  })
+})
+
+describe('bucket paths', () => {
+  const SECONDARY_PORT = 19998
+  const ALPHA_BUCKET = 'alpha'
+  const BETA_BUCKET = 'beta'
+  const MISSING_BUCKET = 'gamma'
+  const SECONDARY_BASE_URL = `http://localhost:${SECONDARY_PORT}`
+
+  let secondaryServer: Server<unknown>
+  let secondaryTmpDir: string
+  let alphaClient: S3Client
+  let betaClient: S3Client
+  let missingClient: S3Client
+
+  beforeAll(async () => {
+    secondaryTmpDir = await mkdtemp(path.join(tmpdir(), 's3-bucket-paths-'))
+    secondaryServer = await new S3Server({
+      key: KEY,
+      secret: SECRET,
+      port: SECONDARY_PORT,
+      bucketPaths: {
+        [ALPHA_BUCKET]: path.join(secondaryTmpDir, ALPHA_BUCKET),
+        [BETA_BUCKET]: path.join(secondaryTmpDir, BETA_BUCKET),
+      },
+    }).start()
+    alphaClient = new S3Client({
+      accessKeyId: KEY,
+      secretAccessKey: SECRET,
+      bucket: ALPHA_BUCKET,
+      endpoint: SECONDARY_BASE_URL,
+    })
+    betaClient = new S3Client({
+      accessKeyId: KEY,
+      secretAccessKey: SECRET,
+      bucket: BETA_BUCKET,
+      endpoint: SECONDARY_BASE_URL,
+    })
+    missingClient = new S3Client({
+      accessKeyId: KEY,
+      secretAccessKey: SECRET,
+      bucket: MISSING_BUCKET,
+      endpoint: SECONDARY_BASE_URL,
+    })
+  })
+
+  afterAll(async () => {
+    secondaryServer.stop()
+    await rm(secondaryTmpDir, { recursive: true, force: true })
+  })
+
+  test('uses only explicitly configured bucket paths when no default path is set', async () => {
+    await Bun.write(alphaClient.file('nested/alpha.txt'), 'alpha')
+    await Bun.write(betaClient.file('nested/beta.txt'), 'beta')
+
+    expect(await alphaClient.file('nested/alpha.txt').text()).toBe('alpha')
+    expect(await betaClient.file('nested/beta.txt').text()).toBe('beta')
+
+    const alphaListing = await alphaClient.list({ prefix: 'nested/' })
+    const betaListing = await betaClient.list({ prefix: 'nested/' })
+
+    expect(alphaListing.contents?.map(item => item.key)).toEqual(['nested/alpha.txt'])
+    expect(betaListing.contents?.map(item => item.key)).toEqual(['nested/beta.txt'])
+  })
+
+  test('rejects buckets without a configured path', async () => {
+    await expect(missingClient.list()).rejects.toThrow(/NoSuchBucket|Bucket not configured/)
+  })
+})
+
+describe('home path expansion', () => {
+  const HOME_PORT = 19999
+  const HOME_BUCKET = 'home-bucket'
+  const HOME_BASE_URL = `http://localhost:${HOME_PORT}`
+
+  let originalHome: string | undefined
+  let homeDir: string
+  let homeServer: Server<unknown>
+  let homeClient: S3Client
+
+  beforeAll(async () => {
+    originalHome = Bun.env.HOME
+    homeDir = await mkdtemp(path.join(tmpdir(), 's3-home-'))
+    Bun.env.HOME = homeDir
+
+    homeServer = await new S3Server({
+      key: KEY,
+      secret: SECRET,
+      port: HOME_PORT,
+      path: '~/fallback',
+      bucketPaths: {
+        [HOME_BUCKET]: '~/bucket-data',
+      },
+    }).start()
+    homeClient = new S3Client({
+      accessKeyId: KEY,
+      secretAccessKey: SECRET,
+      bucket: HOME_BUCKET,
+      endpoint: HOME_BASE_URL,
+    })
+  })
+
+  afterAll(async () => {
+    homeServer.stop()
+    if (originalHome === undefined) {
+      delete Bun.env.HOME
+    } else {
+      Bun.env.HOME = originalHome
+    }
+    await rm(homeDir, { recursive: true, force: true })
+  })
+
+  test('expands tilde-prefixed configured paths against Bun.env.HOME', async () => {
+    expect((await lstat(path.join(homeDir, 'fallback'))).isDirectory()).toBe(true)
+    expect((await lstat(path.join(homeDir, 'bucket-data'))).isDirectory()).toBe(true)
+
+    await Bun.write(homeClient.file('nested/file.txt'), 'hello home')
+    expect(await homeClient.file('nested/file.txt').text()).toBe('hello home')
   })
 })
