@@ -16,6 +16,13 @@ bun server
 ```
 
 By default the server listens on `http://localhost:9000` and stores data under your current directory.
+You can also pass a storage path positionally and flags such as `--port`, for example:
+
+```bash
+bun server ~/storage --port 9002
+```
+
+Run `bun server --help` to see the full CLI usage.
 
 ## Configuration
 
