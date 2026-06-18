@@ -1,5 +1,7 @@
-# S3 Server
-
+<h1>
+  <img alt="Containerization logo" src="./icon.png" width="70" valign="middle">
+  &nbsp;s3 server
+</h1>
 A minimal, local S3-compatible server written in Bun. It stores objects on disk and supports:
 - `GET` object
 - `HEAD` object (size/metadata)
