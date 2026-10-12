@@ -114,3 +114,29 @@ bun test
 
 `index.test.ts` starts a server on port 19997 over a temporary folder and drives it with Bun's `S3Client` (auth,
 objects, deletes, listings with delimiters, bucket paths, `~/` expansion). `server.test.ts` covers the CLI's argument parsing.
+
+## Swift server (`S3ServerSwift`)
+
+An interchangeable, dependency-free Swift implementation lives in its own repository,
+[S3ServerSwift](https://github.com/v57/S3ServerSwift) (macOS 13+, Swift 6). It uses only system frameworks
+(Foundation, Network, CryptoKit, Security) and reproduces this server's S3 behavior: SigV4 header/presigned auth,
+path-style and virtual-host bucket addressing, safe filesystem path handling, PUT/GET/HEAD/DELETE, ListObjectsV2, and
+the same client-observable error XML.
+
+## Verification
+
+The shared TypeScript contract suite runs the same cases against both backends. `test:swift` builds the `Server`
+executable of `../S3ServerSwift` (a checkout next to this one; `S3_SWIFT_SERVER_BIN` points at another build):
+
+```bash
+bun run test:bun        # Bun reference (index.test.ts, server.test.ts)
+bun run test:swift      # build Server + contract suite + CLI process tests
+bun run test:contracts  # both
+```
+
+## Intentional S3 non-goals
+
+Multipart upload, ranged GET, versioning, ACLs, bucket create/delete, and TLS are
+not implemented in either backend. The HTTP transport supports keep-alive for
+sequential requests (as the Bun S3Client uses across PUT/GET), but does not
+support HTTP pipelining of multiple in-flight requests on one connection.

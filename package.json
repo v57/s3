@@ -7,7 +7,11 @@
     "s3": "server.ts"
   },
   "scripts": {
-    "server": "bun server.ts"
+    "server": "bun server.ts",
+    "build:swift": "swift build --package-path ../S3ServerSwift -c release --product Server",
+    "test:bun": "S3_TEST_SERVER=bun bun test index.test.ts server.test.ts",
+    "test:swift": "bun run build:swift && S3_TEST_SERVER=swift S3_SWIFT_SERVER_BIN=${S3_SWIFT_SERVER_BIN:-../S3ServerSwift/.build/release/Server} bun test index.test.ts server.cli.test.ts",
+    "test:contracts": "bun run test:bun && bun run test:swift"
   },
   "devDependencies": {
     "@types/bun": "latest"

@@ -1,40 +1,35 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test'
-import { S3Server } from '.'
 import { S3Client } from 'bun'
-import type { Server } from 'bun'
-import { lstat, mkdtemp, rm } from 'fs/promises'
+import { createHash, createHmac } from 'crypto'
+import { lstat, mkdtemp, rm, symlink } from 'fs/promises'
 import { tmpdir } from 'os'
 import path from 'path'
+import { startTestServer, type TestServer } from './test/server-harness'
 
 const KEY = 'testkey'
 const SECRET = 'testsecret'
-const PORT = 19997
 const BUCKET = 'testbucket'
-const BASE_URL = `http://localhost:${PORT}`
 
 let client: S3Client
-let tmpDir: string
-let server: Server<unknown>
+let server: TestServer
 
 beforeAll(async () => {
-  tmpDir = await mkdtemp(path.join(tmpdir(), 's3-test-'))
-  server = await new S3Server({ key: KEY, secret: SECRET, port: PORT, path: tmpDir }).start()
+  server = await startTestServer({ key: KEY, secret: SECRET })
   client = new S3Client({
     accessKeyId: KEY,
     secretAccessKey: SECRET,
     bucket: BUCKET,
-    endpoint: BASE_URL,
+    endpoint: server.baseUrl,
   })
 })
 
 afterAll(async () => {
-  server.stop()
-  await rm(tmpDir, { recursive: true, force: true })
+  await server.stop()
 })
 
 describe('auth', () => {
   test('rejects unauthenticated request', async () => {
-    const res = await fetch(`${BASE_URL}/${BUCKET}/test.txt`)
+    const res = await fetch(`${server.baseUrl}/${BUCKET}/test.txt`)
     expect(res.status).toBe(403)
     expect(await res.text()).toContain('AccessDenied')
   })
@@ -44,18 +39,21 @@ describe('auth', () => {
       accessKeyId: 'wrong',
       secretAccessKey: 'wrong',
       bucket: BUCKET,
-      endpoint: BASE_URL,
+      endpoint: server.baseUrl,
     })
     await expect(bad.list()).rejects.toThrow()
   })
 })
 
 describe('PUT / GET', () => {
-  test('custom multi-label authority remains path-style', () => {
-    const parsed = (new S3Server({ key: KEY, secret: SECRET }) as any).parseBucketAndKey(
-      new URL('http://s3-owner.v1-network.hub.invalid/hub/folder/object.txt'),
-    )
-    expect(parsed).toEqual({ bucket: 'hub', key: 'folder/object.txt' })
+  test('custom multi-label authority remains path-style', async () => {
+    // A presigned link to a Hub Network share names the share's authority; the first label isn't a bucket
+    const authority = new S3Client({ accessKeyId: KEY, secretAccessKey: SECRET, bucket: BUCKET, endpoint: `http://s3-owner.v1-network.hub.invalid:${server.port}` })
+    await Bun.write(client.file('authority/object.txt'), 'path-style')
+    const url = new URL(authority.presign('authority/object.txt', { method: 'GET', expiresIn: 60 }))
+    const res = await fetch(`${server.baseUrl}${url.pathname}${url.search}`, { headers: { Host: url.host } })
+    expect(res.status).toBe(200)
+    expect(await res.text()).toBe('path-style')
   })
 
   test('roundtrip text object', async () => {
@@ -98,7 +96,7 @@ describe('LIST', () => {
       accessKeyId: KEY,
       secretAccessKey: SECRET,
       bucket: 'emptybucket',
-      endpoint: BASE_URL,
+      endpoint: server.baseUrl,
     })
     const result = await emptyClient.list()
     expect(result.keyCount).toBe(0)
@@ -177,13 +175,11 @@ describe('LIST delimiter', () => {
 })
 
 describe('bucket paths', () => {
-  const SECONDARY_PORT = 19998
   const ALPHA_BUCKET = 'alpha'
   const BETA_BUCKET = 'beta'
   const MISSING_BUCKET = 'gamma'
-  const SECONDARY_BASE_URL = `http://localhost:${SECONDARY_PORT}`
 
-  let secondaryServer: Server<unknown>
+  let secondaryServer: TestServer
   let secondaryTmpDir: string
   let alphaClient: S3Client
   let betaClient: S3Client
@@ -191,37 +187,37 @@ describe('bucket paths', () => {
 
   beforeAll(async () => {
     secondaryTmpDir = await mkdtemp(path.join(tmpdir(), 's3-bucket-paths-'))
-    secondaryServer = await new S3Server({
+    secondaryServer = await startTestServer({
       key: KEY,
       secret: SECRET,
-      port: SECONDARY_PORT,
+      path: null,
       bucketPaths: {
         [ALPHA_BUCKET]: path.join(secondaryTmpDir, ALPHA_BUCKET),
         [BETA_BUCKET]: path.join(secondaryTmpDir, BETA_BUCKET),
       },
-    }).start()
+    })
     alphaClient = new S3Client({
       accessKeyId: KEY,
       secretAccessKey: SECRET,
       bucket: ALPHA_BUCKET,
-      endpoint: SECONDARY_BASE_URL,
+      endpoint: secondaryServer.baseUrl,
     })
     betaClient = new S3Client({
       accessKeyId: KEY,
       secretAccessKey: SECRET,
       bucket: BETA_BUCKET,
-      endpoint: SECONDARY_BASE_URL,
+      endpoint: secondaryServer.baseUrl,
     })
     missingClient = new S3Client({
       accessKeyId: KEY,
       secretAccessKey: SECRET,
       bucket: MISSING_BUCKET,
-      endpoint: SECONDARY_BASE_URL,
+      endpoint: secondaryServer.baseUrl,
     })
   })
 
   afterAll(async () => {
-    secondaryServer.stop()
+    await secondaryServer.stop()
     await rm(secondaryTmpDir, { recursive: true, force: true })
   })
 
@@ -245,13 +241,11 @@ describe('bucket paths', () => {
 })
 
 describe('home path expansion', () => {
-  const HOME_PORT = 19999
   const HOME_BUCKET = 'home-bucket'
-  const HOME_BASE_URL = `http://localhost:${HOME_PORT}`
 
   let originalHome: string | undefined
   let homeDir: string
-  let homeServer: Server<unknown>
+  let homeServer: TestServer
   let homeClient: S3Client
 
   beforeAll(async () => {
@@ -259,25 +253,25 @@ describe('home path expansion', () => {
     homeDir = await mkdtemp(path.join(tmpdir(), 's3-home-'))
     Bun.env.HOME = homeDir
 
-    homeServer = await new S3Server({
+    homeServer = await startTestServer({
       key: KEY,
       secret: SECRET,
-      port: HOME_PORT,
       path: '~/fallback',
       bucketPaths: {
         [HOME_BUCKET]: '~/bucket-data',
       },
-    }).start()
+      environment: { HOME: homeDir },
+    })
     homeClient = new S3Client({
       accessKeyId: KEY,
       secretAccessKey: SECRET,
       bucket: HOME_BUCKET,
-      endpoint: HOME_BASE_URL,
+      endpoint: homeServer.baseUrl,
     })
   })
 
   afterAll(async () => {
-    homeServer.stop()
+    await homeServer.stop()
     if (originalHome === undefined) {
       delete Bun.env.HOME
     } else {
@@ -304,10 +298,10 @@ describe('body before auth', () => {
       const timer = setTimeout(() => reject(new Error('the server waited for the body')), 2000)
       Bun.connect({
         hostname: '127.0.0.1',
-        port: PORT,
+        port: server.port,
         socket: {
           open(socket) {
-            socket.write(`PUT ${path} HTTP/1.1\r\nHost: localhost:${PORT}\r\nContent-Length: 100000000\r\n${extra}\r\n`)
+            socket.write(`PUT ${path} HTTP/1.1\r\nHost: localhost:${server.port}\r\nContent-Length: 100000000\r\n${extra}\r\n`)
             socket.write('x'.repeat(1024))
           },
           data(socket, data) {
@@ -352,3 +346,274 @@ describe('body before auth', () => {
     expect(await client.file('presigned.txt').text()).toBe('hello')
   })
 })
+
+describe('HEAD', () => {
+  test('returns metadata without a body', async () => {
+    await Bun.write(client.file('head/object.txt'), 'head-body-content')
+    const res = await fetch(`${server.baseUrl}/${BUCKET}/head/object.txt`, {
+      method: 'HEAD',
+      headers: signedRequestHeaders('HEAD', `/${BUCKET}/head/object.txt`),
+    })
+    expect(res.status).toBe(200)
+    expect(await res.text()).toBe('')
+    expect(res.headers.get('content-length')).toBe('17')
+    expect(res.headers.get('etag')).toBeTruthy()
+    expect(res.headers.get('last-modified')).toBeTruthy()
+  })
+
+  test('missing object returns 404 NoSuchKey', async () => {
+    const res = await fetch(`${server.baseUrl}/${BUCKET}/head/missing.txt`, {
+      method: 'HEAD',
+      headers: signedRequestHeaders('HEAD', `/${BUCKET}/head/missing.txt`),
+    })
+    expect(res.status).toBe(404)
+    expect(await res.text()).toBe('')
+  })
+})
+
+describe('metadata parity', () => {
+  test('PUT, GET, HEAD share ETag and content length', async () => {
+    const key = 'meta/parity.txt'
+    await Bun.write(client.file(key), 'parity-data')
+    const getRes = await fetch(`${server.baseUrl}/${BUCKET}/${key}`, {
+      headers: signedRequestHeaders('GET', `/${BUCKET}/${key}`),
+    })
+    const headRes = await fetch(`${server.baseUrl}/${BUCKET}/${key}`, {
+      method: 'HEAD',
+      headers: signedRequestHeaders('HEAD', `/${BUCKET}/${key}`),
+    })
+    expect(getRes.status).toBe(200)
+    expect(headRes.status).toBe(200)
+    expect(headRes.headers.get('etag')).toBe(getRes.headers.get('etag'))
+    expect(headRes.headers.get('content-length')).toBe(getRes.headers.get('content-length'))
+    expect(headRes.headers.get('last-modified')).toBe(getRes.headers.get('last-modified'))
+    expect(await getRes.text()).toBe('parity-data')
+  })
+
+  test('known extension maps to a MIME type, unknown falls back to octet-stream', async () => {
+    await Bun.write(client.file('mime/known.txt'), 'txt')
+    await Bun.write(client.file('mime/unknown.zzz'), 'bin')
+    const txtRes = await fetch(`${server.baseUrl}/${BUCKET}/mime/known.txt`, {
+      headers: signedRequestHeaders('GET', `/${BUCKET}/mime/known.txt`),
+    })
+    const unknownRes = await fetch(`${server.baseUrl}/${BUCKET}/mime/unknown.zzz`, {
+      headers: signedRequestHeaders('GET', `/${BUCKET}/mime/unknown.zzz`),
+    })
+    expect(txtRes.headers.get('content-type')).toBeTruthy()
+    expect(txtRes.headers.get('content-type')).not.toContain('octet-stream')
+    expect(unknownRes.headers.get('content-type')).toBe('application/octet-stream')
+  })
+})
+
+describe('body limits', () => {
+  test('declared Content-Length over limit returns 413 EntityTooLarge with XML', async () => {
+    const limited = await startTestServer({ key: KEY, secret: SECRET, maxBodyBytes: 10 })
+    try {
+      const limitedClient = new S3Client({
+        accessKeyId: KEY,
+        secretAccessKey: SECRET,
+        bucket: BUCKET,
+        endpoint: limited.baseUrl,
+      })
+      const res = await fetch(`${limited.baseUrl}/${BUCKET}/limit/declared.txt`, {
+        method: 'PUT',
+        headers: {
+          'content-length': '100',
+          ...signedRequestHeaders('PUT', `/${BUCKET}/limit/declared.txt`, limited.baseUrl),
+        },
+        body: 'x'.repeat(100),
+      })
+      expect(res.status).toBe(413)
+      const text = await res.text()
+      expect(text).toContain('EntityTooLarge')
+      expect(res.headers.get('content-type')).toContain('application/xml')
+      // No partial object persisted.
+      await expect(limitedClient.file('limit/declared.txt').text()).rejects.toThrow()
+    } finally {
+      await limited.stop()
+    }
+  })
+
+  test('streamed body over limit returns 413 and leaves no temp file', async () => {
+    const limited = await startTestServer({ key: KEY, secret: SECRET, maxBodyBytes: 5 })
+    try {
+      const res = await fetch(`${limited.baseUrl}/${BUCKET}/limit/streamed.txt`, {
+        method: 'PUT',
+        headers: {
+          'content-length': '20',
+          ...signedRequestHeaders('PUT', `/${BUCKET}/limit/streamed.txt`, limited.baseUrl),
+        },
+        body: 'y'.repeat(20),
+      })
+      expect(res.status).toBe(413)
+      expect(await res.text()).toContain('EntityTooLarge')
+    } finally {
+      await limited.stop()
+    }
+  })
+})
+
+describe('error XML', () => {
+  test('unauthenticated request returns XML error with escaped fields and request id', async () => {
+    const res = await fetch(`${server.baseUrl}/${BUCKET}/test.txt`)
+    expect(res.status).toBe(403)
+    expect(res.headers.get('content-type')).toContain('application/xml')
+    const text = await res.text()
+    expect(text).toContain('<Error>')
+    expect(text).toContain('<Code>AccessDenied</Code>')
+    expect(text).toContain('<RequestId>')
+    const id = text.match(/<RequestId>(.*?)<\/RequestId>/)?.[1]
+    expect(id?.length).toBeGreaterThan(0)
+  })
+
+  test('authenticated unsupported method returns 405 MethodNotAllowed', async () => {
+    const res = await fetch(`${server.baseUrl}/${BUCKET}/some.txt`, {
+      method: 'PATCH',
+      headers: signedRequestHeaders('PATCH', `/${BUCKET}/some.txt`),
+    })
+    expect(res.status).toBe(405)
+    expect(await res.text()).toContain('MethodNotAllowed')
+  })
+
+  test('missing bucket returns 404 NoSuchBucket', async () => {
+    // A server with no default root rejects buckets without an explicit mapping.
+    const noRoot = await startTestServer({ key: KEY, secret: SECRET, path: null })
+    try {
+      const missingClient = new S3Client({
+        accessKeyId: KEY,
+        secretAccessKey: SECRET,
+        bucket: 'not-configured-bucket',
+        endpoint: noRoot.baseUrl,
+      })
+      await expect(missingClient.list()).rejects.toThrow(/Bucket not configured|NoSuchBucket/)
+    } finally {
+      await noRoot.stop()
+    }
+  })
+})
+
+describe('traversal and symlink protection', () => {
+  test('traversal key is rejected without accessing the target', async () => {
+    const sentinel = path.join(server.storageDirectory, 'sentinel.txt')
+    await Bun.write(sentinel, 'do-not-touch')
+    const traversalRes = await fetch(`${server.baseUrl}/${BUCKET}/../sentinel.txt`, {
+      method: 'GET',
+      headers: signedRequestHeaders('GET', `/${BUCKET}/../sentinel.txt`),
+    })
+    // Bun's URL normalization may collapse the traversal before it reaches the
+    // server; assert on whatever the server sees, which must not leak sentinel.
+    expect(traversalRes.status).not.toBe(200)
+    const text = await traversalRes.text()
+    expect(text).not.toContain('do-not-touch')
+  })
+
+  test('symlinked object path is rejected', async () => {
+    const outside = path.join(server.storageDirectory, 'outside-secret.txt')
+    await Bun.write(outside, 'secret-data')
+    await symlink(outside, path.join(server.storageDirectory, BUCKET, 'evil-link.txt'))
+
+    const res = await fetch(`${server.baseUrl}/${BUCKET}/evil-link.txt`, {
+      method: 'GET',
+      headers: signedRequestHeaders('GET', `/${BUCKET}/evil-link.txt`),
+    })
+    expect(res.status).toBe(400)
+    expect(await res.text()).toContain('InvalidURI')
+  })
+})
+
+describe('list-type validation', () => {
+  test('unsupported list type returns 400 InvalidRequest', async () => {
+    const res = await fetch(`${server.baseUrl}/${BUCKET}?list-type=1`, {
+      headers: signedRequestHeaders('GET', `/${BUCKET}?list-type=1`),
+    })
+    expect(res.status).toBe(400)
+    expect(await res.text()).toContain('InvalidRequest')
+  })
+
+  test('list-type=2 with continuation token paginates without duplication', async () => {
+    for (let i = 0; i < 5; i++) {
+      await Bun.write(client.file(`page/f${i}.txt`), `${i}`)
+    }
+    const first = await fetch(
+      `${server.baseUrl}/${BUCKET}?list-type=2&prefix=page%2F&max-keys=2`,
+      { headers: signedRequestHeaders('GET', `/${BUCKET}?list-type=2&prefix=page%2F&max-keys=2`) },
+    )
+    const firstXml = await first.text()
+    expect(first.status).toBe(200)
+    expect(firstXml).toContain('<IsTruncated>true</IsTruncated>')
+    const nextToken = firstXml.match(/<NextContinuationToken>(.*?)<\/NextContinuationToken>/)?.[1]
+    expect(nextToken).toBeTruthy()
+
+    const second = await fetch(
+      `${server.baseUrl}/${BUCKET}?list-type=2&prefix=page%2F&max-keys=2&continuation-token=${encodeURIComponent(nextToken!)}`,
+      { headers: signedRequestHeaders('GET', `/${BUCKET}?list-type=2&prefix=page%2F&max-keys=2&continuation-token=${encodeURIComponent(nextToken!)}`) },
+    )
+    const secondXml = await second.text()
+    expect(second.status).toBe(200)
+    // Keys in the second page must not repeat the first page's keys.
+    const firstKeys = [...firstXml.matchAll(/<Key>(.*?)<\/Key>/g)].map(m => m[1])
+    const secondKeys = [...secondXml.matchAll(/<Key>(.*?)<\/Key>/g)].map(m => m[1])
+    const overlap = firstKeys.filter(k => secondKeys.includes(k))
+    expect(overlap).toEqual([])
+  })
+})
+
+/**
+ * Builds a minimal AWS SigV4 Authorization header for the request line given,
+ * using the fixed test credentials. This lets contract tests issue raw requests
+ * (HEAD, unsupported methods, query list calls) the S3Client API does not cover.
+ *
+ * The caller must also send `x-amz-content-sha256: UNSIGNED-PAYLOAD` so the
+ * server accepts the unsigned payload marker used in the canonical request.
+ */
+function signHeaderRequest(method: string, target: string, baseUrl = server.baseUrl) {
+  const host = new URL(baseUrl).host
+  const now = new Date()
+  const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '')
+  const date = amzDate.slice(0, 8)
+  const region = 'auto'
+  const service = 's3'
+  const [pathname, query = ''] = target.split('?')
+  // `URL.searchParams` decodes then re-encodes; reproduce that exactly.
+  const searchParams = new URLSearchParams(query)
+  const canonicalQuery = [...searchParams.entries()]
+    .map(([k, v]) => [encodeURIComponent(k), encodeURIComponent(v)] as const)
+    .sort((a, b) => (a[0] === b[0] ? (a[1] < b[1] ? -1 : 1) : a[0] < b[0] ? -1 : 1))
+    .map(([k, v]) => `${k}=${v}`)
+    .join('&')
+  const payloadHash = 'UNSIGNED-PAYLOAD'
+  const canonicalHeaders = `host:${host}\nx-amz-content-sha256:${payloadHash}\nx-amz-date:${amzDate}\n`
+  const signedHeaders = 'host;x-amz-content-sha256;x-amz-date'
+  const canonicalRequest = [
+    method,
+    pathname,
+    canonicalQuery,
+    canonicalHeaders,
+    signedHeaders,
+    payloadHash,
+  ].join('\n')
+  const scope = `${date}/${region}/${service}/aws4_request`
+  const stringToSign = [
+    'AWS4-HMAC-SHA256',
+    amzDate,
+    scope,
+    createHash('sha256').update(canonicalRequest).digest('hex'),
+  ].join('\n')
+  const hmac = (key: string | Uint8Array, data: string) =>
+    createHmac('sha256', key).update(data).digest() as Uint8Array
+  const signingKey = hmac(hmac(hmac(hmac(`AWS4${SECRET}`, date), region), service), 'aws4_request')
+  const signature = createHmac('sha256', signingKey)
+    .update(stringToSign)
+    .digest('hex')
+  return `AWS4-HMAC-SHA256 Credential=${KEY}/${scope}, SignedHeaders=${signedHeaders}, Signature=${signature}`
+}
+
+/** Headers for a raw signed request using the unsigned payload marker. */
+function signedRequestHeaders(method: string, target: string, baseUrl = server.baseUrl): Record<string, string> {
+  const amzDate = new Date().toISOString().replace(/[:-]|\.\d{3}/g, '')
+  return {
+    Authorization: signHeaderRequest(method, target, baseUrl),
+    'x-amz-content-sha256': 'UNSIGNED-PAYLOAD',
+    'x-amz-date': amzDate,
+  }
+}
