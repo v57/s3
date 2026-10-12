@@ -51,6 +51,13 @@ describe('auth', () => {
 })
 
 describe('PUT / GET', () => {
+  test('custom multi-label authority remains path-style', () => {
+    const parsed = (new S3Server({ key: KEY, secret: SECRET }) as any).parseBucketAndKey(
+      new URL('http://s3-owner.v1-network.hub.invalid/hub/folder/object.txt'),
+    )
+    expect(parsed).toEqual({ bucket: 'hub', key: 'folder/object.txt' })
+  })
+
   test('roundtrip text object', async () => {
     await Bun.write(client.file('hello.txt'), 'hello world')
     expect(await client.file('hello.txt').text()).toBe('hello world')

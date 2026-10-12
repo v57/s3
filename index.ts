@@ -1,7 +1,7 @@
 import { lstat, mkdir, readdir, rename, stat, unlink } from 'fs/promises'
 import { createHash, createHmac, timingSafeEqual } from 'crypto'
 import path from 'path'
-import { isIP } from 'net'
+import type { Stats } from 'fs'
 import type { HeadersInit, Server } from 'bun'
 
 export type S3ServerOptions = {
@@ -469,44 +469,14 @@ export class S3Server {
     }
   }
 
-  private parseBucketFromHost(url: URL) {
-    const hostname = url.hostname
-    if (!hostname) return null
-    const lower = hostname.toLowerCase()
-    if (lower === 'localhost' || lower.endsWith('.local') || isIP(lower)) return null
-    const parts = hostname.split('.')
-    // Treat two-label hosts (for example "machine.lan") as endpoint hosts for
-    // path-style requests. Virtual-host style requires a subdomain plus base domain.
-    if (parts.length <= 2) return null
-    const bucket = parts[0]
-    return bucket ? bucket : null
-  }
-
   private parseBucketAndKey(url: URL) {
-    const hostBucket = this.parseBucketFromHost(url)
     const parts = url.pathname.split('/').filter(Boolean)
     let bucket = parts.at(0)
-    if (!bucket) return { bucket: hostBucket, key: null }
+    if (!bucket) return { bucket: null, key: null }
     try {
       bucket = decodeURIComponent(bucket)
     } catch {
       throw new Error('invalid bucket encoding')
-    }
-
-    if (hostBucket && bucket !== hostBucket) {
-      bucket = hostBucket
-      const rawKey = parts.join('/')
-      let key: string | null = null
-      try {
-        key = decodeURIComponent(rawKey)
-      } catch {
-        throw new Error('invalid key encoding')
-      }
-      if (!bucket.trim()) return { bucket: null, key: null }
-      if (bucket.includes('/') || bucket.includes('\\')) {
-        throw new Error('invalid bucket')
-      }
-      return { bucket, key }
     }
 
     let key: string | null = null
@@ -530,7 +500,7 @@ export class S3Server {
     return filePath.split(path.sep).join('/')
   }
 
-  private etagForStats(stats: Awaited<ReturnType<typeof stat>>) {
+  private etagForStats(stats: Stats) {
     const hash = createHash('md5').update(`${stats.size}:${stats.mtimeMs}`).digest('hex')
     return `"${hash}"`
   }
