@@ -1,11 +1,11 @@
 We need to redesign that, cause it should support multiple hubs. How i see that:
 
-# hub-pro
-hub-pro should know it's local hub-net network. 
+# hub-server
+hub-server should know it's local hub-net network. 
 It should expose api `hub/net/share` that generates a temporary code. This code should contain temporary authorization for `hub-net` and `hub-net-node` and address of a node. Default node address is hub.v57.dev/node, it can be excluded from the link to reduce it's size. Link can be converted to base64url.
 
 ## Hub name
-hub-pro should have a name. 
+hub-server should have a name. 
 New api:
 `hub/header` streams hub name
 `hub/header/set` updates hub name
@@ -25,7 +25,7 @@ Each hub can use a different node, so there should be a separate node connection
 Add command `hub-net join $code`
 It
 1. Authorizes with hub's `hub-net` using this code
-2. Connects to `hub-pro` through `hub-net` virtual address
+2. Connects to `hub-server` through `hub-net` virtual address
 3. Authorizes with this code
 4. Reads `hub/header` (just a single value and stop the stream, updates on restart)
 
