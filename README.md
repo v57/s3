@@ -10,6 +10,21 @@ A minimal, local S3-compatible server written in Bun. It stores objects on disk 
 - `ListObjectsV2`
 - SigV4 auth (header and presigned URLs)
 
+## Role in Hub
+
+`s3` is not a Hub service: it never connects to a hub and has no Hub API, permissions or approval. It is the S3
+server [hub-s3-local](https://github.com/v57/hub-s3-local) runs inside its process to share a folder (`~/Hub/Files`
+by default) as the bucket `hub`. hub-s3-local starts it with random keys and hands out presigned links to it, and the
+Hub network sees only hub-s3-local's `s3/*` paths. [hub-s3](https://github.com/v57/hub-s3) doesn't use it: it fronts
+an existing S3 provider. To use the server in another Bun project:
+
+```bash
+bun add v57/s3
+```
+
+The server binds `0.0.0.0` unless `host` (`--host`) says otherwise, and every request needs a SigV4 signature from
+its key and secret.
+
 ## Quick Start
 
 ```bash
@@ -87,3 +102,13 @@ Bun.serve({
 })
 
 ```
+
+## Testing
+
+```bash
+bun i
+bun test
+```
+
+`index.test.ts` starts a server on port 19997 over a temporary folder and drives it with Bun's `S3Client` (auth,
+objects, deletes, listings with delimiters, bucket paths, `~/` expansion). `server.test.ts` covers the CLI's argument parsing.
