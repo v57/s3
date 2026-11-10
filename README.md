@@ -23,7 +23,9 @@ bun add v57/s3
 ```
 
 The server binds `0.0.0.0` unless `host` (`--host`) says otherwise, and every request needs a SigV4 signature from
-its key and secret.
+its key and secret. An upload's signature is checked before its body is read (a header-signed upload must send
+`x-amz-content-sha256`, and its body is compared with that hash after), so an unsigned request can't make the server
+buffer a body.
 
 ## Quick Start
 

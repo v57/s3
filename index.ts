@@ -252,7 +252,9 @@ export class S3Server {
       if (headerHash === 'UNSIGNED-PAYLOAD' || headerHash === 'STREAMING-AWS4-HMAC-SHA256-PAYLOAD') {
         return headerHash
       }
-      const actualHash = this.sha256Hex(payloadBytes ?? new Uint8Array())
+      // Before the body is read, the signature is checked over the declared hash; fetch compares the body after
+      if (payloadBytes === null) return headerHash.toLowerCase()
+      const actualHash = this.sha256Hex(payloadBytes)
       if (headerHash.toLowerCase() !== actualHash) {
         throw new Error('payload hash mismatch')
       }
@@ -649,6 +651,14 @@ export class S3Server {
 
     const expectsBody = req.method === 'PUT' || req.method === 'POST'
     if (expectsBody) {
+      // Check the signature before reading the body, so an unsigned request can't make the server buffer it. A
+      // header-signed request names its payload hash in x-amz-content-sha256, which the signature covers.
+      const isPresigned = url.searchParams.has('X-Amz-Algorithm')
+      if (!isPresigned && !req.headers.get('x-amz-content-sha256')) {
+        return this.s3Error('AccessDenied', 'Missing x-amz-content-sha256', 403)
+      }
+      const earlyAuthError = this.verifySignature(req, url, null)
+      if (earlyAuthError) return earlyAuthError
       const contentLength = req.headers.get('content-length')
       const maxBodyBytes = this.options.maxSize ?? 0
       if (contentLength) {

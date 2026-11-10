@@ -294,3 +294,61 @@ describe('home path expansion', () => {
     expect(await homeClient.file('nested/file.txt').text()).toBe('hello home')
   })
 })
+
+describe('body before auth', () => {
+  // Answers what the server sends to a PUT that announces a large body and never finishes it
+  async function partialPut(path: string, headers: Record<string, string> = {}) {
+    const extra = Object.entries(headers).map(([name, value]) => `${name}: ${value}\r\n`).join('')
+    return await new Promise<string>((resolve, reject) => {
+      let answer = ''
+      const timer = setTimeout(() => reject(new Error('the server waited for the body')), 2000)
+      Bun.connect({
+        hostname: '127.0.0.1',
+        port: PORT,
+        socket: {
+          open(socket) {
+            socket.write(`PUT ${path} HTTP/1.1\r\nHost: localhost:${PORT}\r\nContent-Length: 100000000\r\n${extra}\r\n`)
+            socket.write('x'.repeat(1024))
+          },
+          data(socket, data) {
+            answer += data.toString()
+            if (answer.includes('</Error>')) {
+              clearTimeout(timer)
+              socket.end()
+              resolve(answer)
+            }
+          },
+          error(_, error) {
+            clearTimeout(timer)
+            reject(error)
+          },
+        },
+      })
+    })
+  }
+
+  test('refuses an unsigned upload before reading its body', async () => {
+    const answer = await partialPut(`/${BUCKET}/big.bin`)
+    expect(answer).toStartWith('HTTP/1.1 403')
+    expect(answer).toContain('AccessDenied')
+  })
+
+  test('refuses a badly presigned upload before reading its body', async () => {
+    const url = new URL(client.presign('big.bin', { method: 'PUT', expiresIn: 60 }))
+    url.searchParams.set('X-Amz-Signature', '0'.repeat(64))
+    const answer = await partialPut(`${url.pathname}${url.search}`)
+    expect(answer).toStartWith('HTTP/1.1 403')
+    expect(answer).toContain('Signature mismatch')
+  })
+
+  test('refuses a header-signed upload without x-amz-content-sha256', async () => {
+    const answer = await partialPut(`/${BUCKET}/big.bin`, { Authorization: `AWS4-HMAC-SHA256 Credential=${KEY}/20260101/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=${'0'.repeat(64)}` })
+    expect(answer).toContain('Missing x-amz-content-sha256')
+  })
+
+  test('presigned uploads still work', async () => {
+    const url = client.presign('presigned.txt', { method: 'PUT', expiresIn: 60 })
+    expect((await fetch(url, { method: 'PUT', body: 'hello' })).status).toBe(200)
+    expect(await client.file('presigned.txt').text()).toBe('hello')
+  })
+})
