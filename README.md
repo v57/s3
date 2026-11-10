@@ -105,6 +105,37 @@ Bun.serve({
 
 ```
 
+## Swift server (`S3ServerSwift`)
+
+The same server in Swift 6, dependency-free (Foundation, Network, CryptoKit, Security), for apps that embed it: the
+[Hub app](https://github.com/v57/hub-app)'s **Storage** shares part of an iPhone's, iPad's or Mac's storage with a hub
+through it. It lives in its own repository, [S3ServerSwift](https://github.com/v57/S3ServerSwift) (macOS 13, iOS 16,
+tvOS 16, visionOS 1):
+
+```swift
+.package(url: "https://github.com/v57/S3ServerSwift.git", branch: "main")
+// target dependency: .product(name: "S3ServerSwift", package: "S3ServerSwift")
+```
+
+It answers the same S3 requests with the same error XML, checks signatures the same way (before the body), and on top:
+
+- uploads stream to a temporary file next to the object, hashed as they come, and replace it once complete; listings
+  skip uploads in progress;
+- `GET` with one `Range` answers 206 (or 416);
+- deleting an object removes the folders it leaves empty, and a key that names a folder is no object;
+- `S3ServerHooks`: which remote addresses get answers, a check of every upload before its body (a quota answers
+  `S3Error.storageFull`, 507), and the changes made through the server;
+- `S3Storage` (`server.storage`): list, size, delete and used bytes in process; `S3Presigner`: presigned links.
+
+Like the Bun server it ignores the host for buckets (path-style only). Its README covers the API.
+
+The `Server` executable takes the Bun CLI's flags, positional path and environment:
+
+```bash
+bun run build:swift   # swift build --package-path ../S3ServerSwift -c release --product Server
+../S3ServerSwift/.build/release/Server ~/storage --port 9002
+```
+
 ## Testing
 
 ```bash
@@ -112,31 +143,20 @@ bun i
 bun test
 ```
 
-`index.test.ts` starts a server on port 19997 over a temporary folder and drives it with Bun's `S3Client` (auth,
-objects, deletes, listings with delimiters, bucket paths, `~/` expansion). `server.test.ts` covers the CLI's argument parsing.
+`index.test.ts` starts a server on a free port over a temporary folder and drives it with Bun's `S3Client` (auth,
+uploads refused before their body, objects, deletes, listings with delimiters, bucket paths, `~/` expansion, body
+limits, Hub Network authorities staying path-style). `server.test.ts` covers the CLI's argument parsing.
 
-## Swift server (`S3ServerSwift`)
-
-An interchangeable, dependency-free Swift implementation lives in its own repository,
-[S3ServerSwift](https://github.com/v57/S3ServerSwift) (macOS 13+, Swift 6). It uses only system frameworks
-(Foundation, Network, CryptoKit, Security) and reproduces this server's S3 behavior: SigV4 header/presigned auth,
-path-style and virtual-host bucket addressing, safe filesystem path handling, PUT/GET/HEAD/DELETE, ListObjectsV2, and
-the same client-observable error XML.
-
-## Verification
-
-The shared TypeScript contract suite runs the same cases against both backends. `test:swift` builds the `Server`
-executable of `../S3ServerSwift` (a checkout next to this one; `S3_SWIFT_SERVER_BIN` points at another build):
+The same suite runs against the Swift server, with `server.cli.test.ts` for its executable. `test:swift` builds
+`../S3ServerSwift` (a checkout next to this one; `S3_SWIFT_SERVER_BIN` points at another build):
 
 ```bash
-bun run test:bun        # Bun reference (index.test.ts, server.test.ts)
-bun run test:swift      # build Server + contract suite + CLI process tests
+bun run test:bun        # Bun (index.test.ts, server.test.ts)
+bun run test:swift      # builds Server, then index.test.ts and server.cli.test.ts against it
 bun run test:contracts  # both
 ```
 
 ## Intentional S3 non-goals
 
-Multipart upload, ranged GET, versioning, ACLs, bucket create/delete, and TLS are
-not implemented in either backend. The HTTP transport supports keep-alive for
-sequential requests (as the Bun S3Client uses across PUT/GET), but does not
-support HTTP pipelining of multiple in-flight requests on one connection.
+Multipart upload, versioning, ACLs, bucket create/delete, and TLS are not implemented in either server (ranged GET
+only in Swift). The HTTP transport supports keep-alive for sequential requests, not pipelining.
