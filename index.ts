@@ -778,7 +778,8 @@ export class S3Server {
 
     if (req.method === 'HEAD') {
       const stats = await stat(filePath).catch(() => null)
-      if (!stats) return this.s3Error('NoSuchKey', 'Object not found', 404)
+      // A folder on disk only holds keys under it; like S3, the key itself has no object
+      if (!stats?.isFile()) return this.s3Error('NoSuchKey', 'Object not found', 404)
       return new Response(null, {
         status: 200,
         headers: {
@@ -791,7 +792,8 @@ export class S3Server {
 
     if (req.method === 'GET') {
       const stats = await stat(filePath).catch(() => null)
-      if (!stats) return this.s3Error('NoSuchKey', 'Object not found', 404)
+      // A folder on disk only holds keys under it; like S3, the key itself has no object
+      if (!stats?.isFile()) return this.s3Error('NoSuchKey', 'Object not found', 404)
       const file = Bun.file(filePath)
       return new Response(file, {
         status: 200,

@@ -369,6 +369,33 @@ describe('HEAD', () => {
     expect(res.status).toBe(404)
     expect(await res.text()).toBe('')
   })
+
+  test('a folder with keys under it has no object of its own', async () => {
+    // Like S3: `mods` and `mods/` are NoSuchKey even though `mods/…` keys exist
+    await Bun.write(client.file('mods/config.txt'), 'config')
+    for (const key of ['mods', 'mods/']) {
+      const head = await fetch(`${server.baseUrl}/${BUCKET}/${key}`, {
+        method: 'HEAD',
+        headers: signedRequestHeaders('HEAD', `/${BUCKET}/${key}`),
+      })
+      expect(head.status).toBe(404)
+      const get = await fetch(`${server.baseUrl}/${BUCKET}/${key}`, {
+        headers: signedRequestHeaders('GET', `/${BUCKET}/${key}`),
+      })
+      expect(get.status).toBe(404)
+      expect(await get.text()).toContain('<Code>NoSuchKey</Code>')
+    }
+    expect(await client.exists('mods')).toBe(false)
+
+    await Bun.write(client.file('mods/jar/mod.jar'), 'jar')
+    expect(await client.file('mods/config.txt').text()).toBe('config')
+    expect(await client.file('mods/jar/mod.jar').text()).toBe('jar')
+    const listed = await client.list({ prefix: 'mods/' })
+    expect(listed.contents?.map(c => c.key).sort()).toEqual(['mods/config.txt', 'mods/jar/mod.jar'])
+    const grouped = await client.list({ prefix: 'mods/', delimiter: '/' })
+    expect(grouped.contents?.map(c => c.key)).toEqual(['mods/config.txt'])
+    expect(grouped.commonPrefixes?.map(p => p.prefix)).toEqual(['mods/jar/'])
+  })
 })
 
 describe('metadata parity', () => {
